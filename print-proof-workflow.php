@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Print Product Workflow for WooCommerce
  * Description: Загрузка файла для товаров типографии, вебхук, статусы проверки/оплаты/утверждения макета, подтверждение макета клиентом.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: OpenAI
  * Requires Plugins: woocommerce
  * Text Domain: ppw
@@ -17,6 +17,7 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
         const PRODUCT_META_ENABLED = '_ppw_enable_print_workflow';
         const PRODUCT_META_CONFIG = '_ppw_configurator_json';
         const CART_KEY_CONFIG = 'ppw_configurator';
+        const CART_KEY_PRICE = 'ppw_calculated_price';
         const ITEM_META_CONFIG = '_ppw_configurator_json';
         const CART_KEY_FILE = 'ppw_uploaded_file';
         const ITEM_META_URL = '_ppw_file_url';
@@ -47,6 +48,11 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
             add_filter('woocommerce_add_to_cart_validation', [$this, 'validate_upload_field'], 10, 3);
             add_filter('woocommerce_add_cart_item_data', [$this, 'add_cart_item_data'], 10, 3);
             add_filter('woocommerce_get_item_data', [$this, 'display_cart_item_data'], 10, 2);
+            add_action('woocommerce_before_calculate_totals', [$this, 'apply_calculated_cart_prices'], 40);
+
+            add_filter('woocommerce_checkout_fields', [$this, 'disable_billing_address_fields']);
+            add_filter('woocommerce_billing_fields', [$this, 'disable_billing_address_field_group']);
+            add_filter('woocommerce_order_item_get_formatted_meta_data', [$this, 'hide_customer_file_url_meta'], 10, 2);
 
             add_action('woocommerce_checkout_create_order_line_item', [$this, 'save_line_item_meta'], 10, 4);
             add_action('woocommerce_checkout_order_processed', [$this, 'set_initial_status_and_send_webhook'], 20, 3);
@@ -93,8 +99,8 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
                 return;
             }
 
-            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.3.0');
-            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.3.0', true);
+            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.3.1');
+            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.3.1', true);
 
             $config = $this->get_product_config($product_id);
 
@@ -513,6 +519,7 @@ public function cleanup_duplicate_plain_items() {
                 <div class="ppw-configurator" data-ppw-configurator></div>
                 <input type="hidden" name="ppw_config" value="">
             <?php endif; ?>
+            <input type="hidden" name="ppw_calculated_price" value="">
             <div class="ppw-upload-field">
                 <label class="ppw-upload-field__label" for="ppw_print_file"><strong>Файл для печати</strong></label>
                 <input type="file" id="ppw_print_file" name="ppw_print_file" accept=".pdf,.ai,.psd,.png,.jpg,.jpeg" required>
@@ -588,6 +595,13 @@ public function cleanup_duplicate_plain_items() {
         }
     }
 
+    if (isset($_POST['ppw_calculated_price'])) {
+        $calculated_price = wc_format_decimal(wp_unslash($_POST['ppw_calculated_price']));
+        if ('' !== $calculated_price && is_numeric($calculated_price) && (float) $calculated_price >= 0) {
+            $cart_item_data[self::CART_KEY_PRICE] = (float) $calculated_price;
+        }
+    }
+
     $cart_item_data['unique_key'] = md5(wp_json_encode($uploaded) . wp_json_encode($cart_item_data[self::CART_KEY_CONFIG] ?? []) . microtime(true));
 
     /**
@@ -612,6 +626,48 @@ public function cleanup_duplicate_plain_items() {
 
     return $cart_item_data;
 }
+
+        public function apply_calculated_cart_prices($cart) {
+            if (!$cart || !method_exists($cart, 'get_cart')) {
+                return;
+            }
+
+            foreach ($cart->get_cart() as $cart_item) {
+                if (!isset($cart_item[self::CART_KEY_PRICE]) || !isset($cart_item['data']) || !is_object($cart_item['data'])) {
+                    continue;
+                }
+
+                $cart_item['data']->set_price((float) $cart_item[self::CART_KEY_PRICE]);
+            }
+        }
+
+        public function disable_billing_address_fields($fields) {
+            if (isset($fields['billing'])) {
+                $fields['billing'] = $this->disable_billing_address_field_group($fields['billing']);
+            }
+
+            return $fields;
+        }
+
+        public function disable_billing_address_field_group($fields) {
+            $address_fields = ['billing_company', 'billing_country', 'billing_address_1', 'billing_address_2', 'billing_city', 'billing_state', 'billing_postcode'];
+
+            foreach ($address_fields as $field_name) {
+                unset($fields[$field_name]);
+            }
+
+            return $fields;
+        }
+
+        public function hide_customer_file_url_meta($formatted_meta, $item) {
+            foreach ($formatted_meta as $meta_id => $meta) {
+                if (isset($meta->key) && 'Файл для печати' === $meta->key) {
+                    unset($formatted_meta[$meta_id]);
+                }
+            }
+
+            return $formatted_meta;
+        }
 
         private function handle_upload($file) {
             require_once ABSPATH . 'wp-admin/includes/file.php';
@@ -672,8 +728,6 @@ public function cleanup_duplicate_plain_items() {
             $item->add_meta_data(self::ITEM_META_REVIEW_STATUS, 'pending', true);
             $item->add_meta_data(self::ITEM_META_REVIEW_NOTE, '', true);
             $item->add_meta_data(self::ITEM_META_PROOF_URL, '', true);
-            $item->add_meta_data('Файл для печати', esc_url_raw($file['url']), true);
-
             if (!empty($values[self::CART_KEY_CONFIG])) {
                 $item->add_meta_data(self::ITEM_META_CONFIG, wp_json_encode($values[self::CART_KEY_CONFIG], JSON_UNESCAPED_UNICODE), true);
                 $item->add_meta_data('Параметры печати', $this->render_config_summary($values[self::CART_KEY_CONFIG], false), true);
@@ -996,7 +1050,7 @@ public function cleanup_duplicate_plain_items() {
             if (!$url) {
                 return;
             }
-            echo '<p><strong>Файл для печати:</strong> <a href="' . esc_url($url) . '" target="_blank" rel="noopener">' . esc_html($name ?: basename($url)) . '</a></p>';
+            echo '<p><strong>Файл для печати:</strong> ' . esc_html($name ?: basename($url)) . '</p>';
 
             $status = $this->get_item_review_status($item);
             $note = (string) $item->get_meta(self::ITEM_META_REVIEW_NOTE, true);

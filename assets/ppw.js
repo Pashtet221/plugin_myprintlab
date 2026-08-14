@@ -492,6 +492,11 @@
         var formData = new FormData(form);
         formData.set('quantity', '1');
 
+        var calculatedPrice = getDisplayedProductPrice(form);
+        if (calculatedPrice !== null) {
+            formData.set('ppw_calculated_price', String(calculatedPrice));
+        }
+
         var addToCartValue = '';
         var addToCartInput = form.querySelector('[name="add-to-cart"]');
         var productIdInput = form.querySelector('[name="product_id"]');
@@ -573,6 +578,51 @@
                     submitButton.disabled = false;
                 }
             });
+    }
+
+    function getDisplayedProductPrice(form) {
+        var product = form.closest('.product') || document;
+        var selectors = [
+            '.woocommerce-variation-price .woocommerce-Price-amount',
+            '.summary .price .woocommerce-Price-amount',
+            '.summary .price .amount',
+            '.price .woocommerce-Price-amount',
+            '.price .amount'
+        ];
+
+        for (var i = 0; i < selectors.length; i += 1) {
+            var amounts = product.querySelectorAll(selectors[i]);
+            for (var j = amounts.length - 1; j >= 0; j -= 1) {
+                if (amounts[j].offsetParent === null) {
+                    continue;
+                }
+                var parsed = parsePrice(amounts[j].textContent);
+                if (parsed !== null) {
+                    return parsed;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function parsePrice(value) {
+        var cleaned = String(value || '').replace(/[^0-9,.-]/g, '');
+        if (!cleaned) {
+            return null;
+        }
+
+        var decimalSeparator = window.wc_price_params && window.wc_price_params.decimal_separator
+            ? window.wc_price_params.decimal_separator
+            : (cleaned.lastIndexOf(',') > cleaned.lastIndexOf('.') ? ',' : '.');
+        var thousandsSeparator = decimalSeparator === ',' ? '.' : ',';
+        cleaned = cleaned.split(thousandsSeparator).join('');
+        if (decimalSeparator !== '.') {
+            cleaned = cleaned.replace(decimalSeparator, '.');
+        }
+
+        var price = Number(cleaned);
+        return Number.isFinite(price) && price >= 0 ? price : null;
     }
 
     function validateConfig(params, errors) {
