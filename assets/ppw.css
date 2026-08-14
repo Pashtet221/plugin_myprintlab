@@ -1,0 +1,145 @@
+.ppw-upload-field {
+    margin: 0 0 18px;
+    padding: 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.ppw-upload-field__label {
+    display: block;
+    margin-bottom: 8px;
+}
+
+.ppw-upload-field__hint {
+    margin: 8px 0 0;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+.ppw-box {
+    margin: 24px 0;
+    padding: 20px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.ppw-configurator {
+    margin: 0 0 18px;
+    padding: 16px;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    background: #ffffff;
+}
+
+.ppw-configurator__title {
+    margin: 0 0 14px;
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.ppw-config-field {
+    margin: 0 0 16px;
+    padding-left: calc(var(--ppw-level, 0) * 14px);
+}
+
+.ppw-config-field__label {
+    margin-bottom: 6px;
+}
+
+.ppw-config-field__desc {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #6b7280;
+}
+
+.ppw-config-field__desc a {
+    white-space: nowrap;
+}
+
+.ppw-config-field__control select,
+.ppw-config-field__control input[type="number"] {
+    width: 100%;
+    max-width: 360px;
+}
+
+.ppw-choice {
+    display: block;
+    margin: 6px 0;
+    cursor: pointer;
+}
+
+.ppw-required {
+    color: #dc2626;
+}
+
+.ppw-number-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.ppw-number-unit {
+    color: #6b7280;
+    font-size: 14px;
+}
+
+.ppw-config-field__children {
+    margin-top: 10px;
+    border-left: 2px solid #e5e7eb;
+}
+
+.ppw-config-summary {
+    margin: 8px 0 0 18px;
+}
+
+
+/* У типографских товаров количество WooCommerce не используется: количество задаётся полем «Тираж». */
+form.cart:has([data-ppw-configurator]) .quantity {
+    display: none !important;
+}
+
+/* Woodmart и стандартный WooCommerce: у типографского товара штатные quantity/add-to-cart не используются. */
+body.ppw-print-product form.cart .quantity,
+body.ppw-print-product form.cart .quantity-wrapper,
+body.ppw-print-product form.cart .wd-quantity-overlap,
+body.ppw-print-product form.cart .wd-quantity-plus,
+body.ppw-print-product form.cart .wd-quantity-minus,
+body.ppw-print-product form.cart .single_add_to_cart_button,
+body.ppw-print-product form.cart button[name="add-to-cart"],
+body.ppw-print-product form.cart input[name="add-to-cart"],
+body.ppw-print-product .wd-sticky-btn-cart .quantity,
+body.ppw-print-product .wd-sticky-btn-cart .single_add_to_cart_button,
+body.ppw-print-product .wd-sticky-add-to-cart .quantity,
+body.ppw-print-product .wd-sticky-add-to-cart .single_add_to_cart_button {
+    display: none !important;
+}
+
+body.ppw-print-product .ppw-submit-workflow {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    margin-top: 16px;
+}
+
+/* Workflow проверки файлов в заказе */
+.ppw-file-action-form,
+.ppw-item-proof {
+    margin: 12px 0;
+    padding: 14px;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    background: #f8fafc;
+}
+
+.ppw-file-action-form input[type="file"] {
+    display: block;
+    margin: 8px 0 12px;
+}
+
+.ppw-file-note {
+    margin: 8px 0;
+    color: #4b5563;
+}
