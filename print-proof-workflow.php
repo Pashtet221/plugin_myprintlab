@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Print Product Workflow for WooCommerce
  * Description: Загрузка файла для товаров типографии, вебхук, статусы проверки/оплаты/утверждения макета, подтверждение макета клиентом.
- * Version: 1.4.0
+ * Version: 1.4.1
  * Author: OpenAI
  * Requires Plugins: woocommerce
  * Text Domain: ppw
@@ -103,8 +103,8 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
                 return;
             }
 
-            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.4.0');
-            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.4.0', true);
+            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.4.1');
+            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.4.1', true);
 
             $config = $this->get_product_config($product_id);
 

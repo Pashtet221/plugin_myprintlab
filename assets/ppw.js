@@ -149,15 +149,16 @@
 
         if (param.type === 'radio') {
             (param.options || []).forEach(function (option, index) {
+                var optionValue = getOptionValue(param, option);
                 var label = document.createElement('label');
                 label.className = 'ppw-choice';
                 var input = document.createElement('input');
                 input.type = 'radio';
                 input.name = idBase;
-                input.value = option.value;
-                input.checked = String(param.value) === String(option.value);
+                input.value = optionValue;
+                input.checked = String(param.value) === String(optionValue);
                 input.addEventListener('change', function () {
-                    param.value = option.value;
+                    param.value = optionValue;
                     resetHiddenBranches(param);
                     renderConfigurator(root, hidden);
                 });
@@ -288,6 +289,25 @@
                 control.appendChild(multiLabel);
             });
         }
+    }
+
+    /**
+     * Older colour configurations may contain a copied option value (usually
+     * "4+4") while their labels correctly say "4+0" and "4+4".  The browser
+     * submits the option value, not its visible label, so both choices used to
+     * produce 4+4. Keep the configured values for every other parameter, but
+     * recover the well-known print colour notation from the colour label.
+     */
+    function getOptionValue(param, option) {
+        var paramId = String(param && param.id ? param.id : '').toLowerCase();
+        var isColour = paramId === 'color' || paramId === 'colour' || paramId === 'cvetnost';
+        var match = isColour ? String(option && option.label ? option.label : '').match(/^\s*(\d+\s*\+\s*\d+)/) : null;
+
+        if (match) {
+            return match[1].replace(/\s/g, '');
+        }
+
+        return option ? option.value : '';
     }
 
     function renderVisibleChildren(param, container, root, hidden, level) {
