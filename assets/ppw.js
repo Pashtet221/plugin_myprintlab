@@ -361,6 +361,30 @@
             return;
         }
         hidden.value = JSON.stringify(pruneHidden(clone(root.ppwState)));
+        syncLegacyInputs(root, root.ppwState.params || []);
+    }
+
+    // The price calculator used on the product page also keeps flat ppw_* fields.
+    // Keep them in sync: integrations which serialize the whole form must not see
+    // a stale default (notably ppw_color=4+4) beside the configurator JSON.
+    function syncLegacyInputs(root, params) {
+        var form = root.closest('form.cart');
+        if (!form) return;
+
+        (params || []).forEach(function (param) {
+            if (param.id) {
+                var name = 'ppw_' + String(param.id).replace(/[^a-z0-9_-]/gi, '');
+                form.querySelectorAll('[name="' + name + '"]').forEach(function (input) {
+                    if (input.type !== 'radio' && input.type !== 'checkbox' && input.name !== 'ppw_config') {
+                        input.value = param.value === null || param.value === undefined ? '' : String(param.value);
+                    }
+                });
+            }
+            if (Array.isArray(param.children)) syncLegacyInputs(root, param.children);
+            (param.options || []).forEach(function (option) {
+                if (Array.isArray(option.children)) syncLegacyInputs(root, option.children);
+            });
+        });
     }
 
     function pruneHidden(config) {
@@ -583,7 +607,10 @@
                 }
 
                 if (typeof jQuery !== 'undefined' && response.data.fragments) {
-                    jQuery(document.body).trigger('added_to_cart', [response.data.fragments, response.data.cart_hash || '', submitButton]);
+                    // WooCommerce/WoodMart handlers expect a jQuery object here
+                    // and call .removeClass() on it.
+                    var $button = submitButton ? jQuery(submitButton) : jQuery();
+                    jQuery(document.body).trigger('added_to_cart', [response.data.fragments, response.data.cart_hash || '', $button]);
                 }
 
                 showNotice('success', response.data.message || 'Товар добавлен в корзину.');
