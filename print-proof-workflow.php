@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Print Product Workflow for WooCommerce
  * Description: Загрузка файла для товаров типографии, вебхук, статусы проверки/оплаты/утверждения макета, подтверждение макета клиентом.
- * Version: 1.4.1
+ * Version: 1.4.2
  * Author: OpenAI
  * Requires Plugins: woocommerce
  * Text Domain: ppw
@@ -35,6 +35,8 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
         const ORDER_META_PROOF_NOTE = '_ppw_proof_note';
         const OPTION_WEBHOOK_URL = 'ppw_webhook_url';
         const OPTION_WEBHOOK_SECRET = 'ppw_webhook_secret';
+        const ORDER_META_WEBHOOK_SENT = '_ppw_created_webhook_sent';
+        const ORDER_META_WEBHOOK_ATTEMPTS = '_ppw_created_webhook_attempts';
 
         public function __construct() {
             add_action('init', [$this, 'register_statuses']);
@@ -60,6 +62,8 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
 
             add_action('woocommerce_checkout_create_order_line_item', [$this, 'save_line_item_meta'], 10, 4);
             add_action('woocommerce_checkout_order_processed', [$this, 'set_initial_status_and_send_webhook'], 20, 3);
+            add_action('woocommerce_store_api_checkout_order_processed', [$this, 'handle_store_api_order_processed'], 20, 1);
+            add_action('ppw_retry_created_webhook', [$this, 'retry_created_webhook'], 10, 1);
             add_action('woocommerce_order_item_meta_end', [$this, 'render_order_item_file_meta'], 10, 3);
 
             add_filter('woocommerce_valid_order_statuses_for_payment', [$this, 'allow_payment_for_custom_status'], 10, 2);
@@ -103,8 +107,8 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
                 return;
             }
 
-            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.4.1');
-            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.4.1', true);
+            wp_enqueue_style('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.css', [], '1.4.2');
+            wp_enqueue_script('ppw-frontend', plugin_dir_url(__FILE__) . 'assets/ppw.js', [], '1.4.2', true);
 
             $config = $this->get_product_config($product_id);
 
@@ -985,13 +989,42 @@ public function cleanup_duplicate_plain_items() {
                 $order->update_status('file-review', 'Заказ автоматически переведен в статус «На проверке файла».');
             }
 
-            $this->send_webhook($order, $file_urls);
+            if ('yes' === $order->get_meta(self::ORDER_META_WEBHOOK_SENT, true)) {
+                return;
+            }
+
+            $attempts = (int) $order->get_meta(self::ORDER_META_WEBHOOK_ATTEMPTS, true) + 1;
+            $order->update_meta_data(self::ORDER_META_WEBHOOK_ATTEMPTS, $attempts);
+
+            if ($this->send_webhook($order, $file_urls)) {
+                $order->update_meta_data(self::ORDER_META_WEBHOOK_SENT, 'yes');
+                $order->save_meta_data();
+            } elseif ($attempts < 5 && !wp_next_scheduled('ppw_retry_created_webhook', [$order->get_id()])) {
+                $order->save_meta_data();
+                wp_schedule_single_event(time() + MINUTE_IN_SECONDS, 'ppw_retry_created_webhook', [$order->get_id()]);
+            } else {
+                $order->save_meta_data();
+            }
+        }
+
+        /** Support Checkout Blocks/Store API, which does not run the classic checkout hook. */
+        public function handle_store_api_order_processed($order) {
+            if ($order instanceof WC_Order) {
+                $this->set_initial_status_and_send_webhook($order->get_id(), [], $order);
+            }
+        }
+
+        public function retry_created_webhook($order_id) {
+            $order = wc_get_order($order_id);
+            if ($order instanceof WC_Order) {
+                $this->set_initial_status_and_send_webhook($order_id, [], $order);
+            }
         }
 
         private function send_webhook($order, $file_urls) {
             $webhook_url = trim((string) get_option(self::OPTION_WEBHOOK_URL, ''));
             if (!$webhook_url) {
-                return;
+                return false;
             }
 
             $items = [];
@@ -1036,11 +1069,24 @@ public function cleanup_duplicate_plain_items() {
                 $headers['X-PPW-Secret'] = $secret;
             }
 
-            wp_remote_post($webhook_url, [
+            $response = wp_remote_post($webhook_url, [
                 'timeout' => 20,
                 'headers' => $headers,
                 'body'    => wp_json_encode($payload),
             ]);
+
+            $successful = !is_wp_error($response) && wp_remote_retrieve_response_code($response) >= 200 && wp_remote_retrieve_response_code($response) < 300;
+            if (!$successful && function_exists('wc_get_logger')) {
+                $message = is_wp_error($response)
+                    ? $response->get_error_message()
+                    : sprintf('HTTP %d: %s', wp_remote_retrieve_response_code($response), wp_remote_retrieve_body($response));
+                wc_get_logger()->error('Не удалось отправить webhook создания заказа: ' . $message, [
+                    'source' => 'ppw-webhook',
+                    'order_id' => $order->get_id(),
+                ]);
+            }
+
+            return $successful;
         }
 
         public function render_order_item_file_meta($item_id, $item, $order) {
