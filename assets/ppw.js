@@ -177,10 +177,11 @@
             empty.textContent = 'Выберите значение';
             select.appendChild(empty);
             (param.options || []).forEach(function (option) {
+                var optionValue = getOptionValue(param, option);
                 var opt = document.createElement('option');
-                opt.value = option.value;
+                opt.value = optionValue;
                 opt.textContent = option.label || option.value;
-                opt.selected = String(param.value) === String(option.value);
+                opt.selected = String(param.value) === String(optionValue);
                 select.appendChild(opt);
             });
             select.addEventListener('change', function () {
@@ -300,7 +301,9 @@
      */
     function getOptionValue(param, option) {
         var paramId = String(param && param.id ? param.id : '').toLowerCase();
-        var isColour = paramId === 'color' || paramId === 'colour' || paramId === 'cvetnost';
+        var paramLabel = String(param && param.label ? param.label : '').toLowerCase();
+        var isColour = /(^|[_-])(color|colour|cvet|cvetnost)([_-]|$)/.test(paramId) ||
+            /цветност|color|colour/.test(paramLabel);
         var match = isColour ? String(option && option.label ? option.label : '').match(/^\s*(\d+\s*\+\s*\d+)/) : null;
 
         if (match) {
@@ -323,7 +326,7 @@
             }
 
             (param.options || []).forEach(function (option) {
-                if (String(option.value) === String(param.value) && Array.isArray(option.children)) {
+                if (String(getOptionValue(param, option)) === String(param.value) && Array.isArray(option.children)) {
                     renderParams(option.children, container, root, hidden, level);
                 }
             });
@@ -337,7 +340,7 @@
 
         if ((param.type === 'radio' || param.type === 'select') && Array.isArray(param.options)) {
             param.options.forEach(function (option) {
-                if (String(option.value) !== String(param.value) && Array.isArray(option.children)) {
+                if (String(getOptionValue(param, option)) !== String(param.value) && Array.isArray(option.children)) {
                     resetParams(option.children);
                 }
             });
@@ -407,7 +410,7 @@
             if ((copy.type === 'radio' || copy.type === 'select') && Array.isArray(copy.options)) {
                 copy.options = copy.options.map(function (option) {
                     var optionCopy = clone(option);
-                    if (String(optionCopy.value) === String(copy.value) && Array.isArray(optionCopy.children)) {
+                    if (String(getOptionValue(copy, optionCopy)) === String(copy.value) && Array.isArray(optionCopy.children)) {
                         optionCopy.children = pruneParams(optionCopy.children);
                     } else if (Array.isArray(optionCopy.children)) {
                         optionCopy.children = null;
