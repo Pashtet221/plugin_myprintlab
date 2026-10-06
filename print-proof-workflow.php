@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Print Product Workflow for WooCommerce
  * Description: Загрузка файла для товаров типографии, вебхук, статусы проверки/оплаты/утверждения макета, подтверждение макета клиентом.
- * Version: 1.4.3
+ * Version: 1.5.0
  * Author: OpenAI
  * Requires Plugins: woocommerce
  * Text Domain: ppw
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
 
 if (!class_exists('PPW_Print_Product_Workflow')) {
     class PPW_Print_Product_Workflow {
-        const VERSION = '1.4.3';
+        const VERSION = '1.5.0';
         const PRODUCT_META_ENABLED = '_ppw_enable_print_workflow';
         const PRODUCT_META_CONFIG = '_ppw_configurator_json';
         const CART_KEY_CONFIG = 'ppw_configurator';
@@ -38,6 +38,11 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
         const OPTION_WEBHOOK_SECRET = 'ppw_webhook_secret';
         const ORDER_META_WEBHOOK_SENT = '_ppw_created_webhook_sent';
         const ORDER_META_WEBHOOK_ATTEMPTS = '_ppw_created_webhook_attempts';
+        const ORDER_META_UPDATE_REVISION = '_ppw_update_revision';
+        const ORDER_META_UPDATE_SENT = '_ppw_update_sent_revision';
+        const ORDER_META_UPDATE_ATTEMPTS = '_ppw_update_webhook_attempts';
+        const ORDER_META_UPDATE_ACTION = '_ppw_update_action';
+        const ORDER_META_UPDATE_ITEM = '_ppw_update_item_id';
 
         public function __construct() {
             add_action('init', [$this, 'register_statuses']);
@@ -65,9 +70,11 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
             add_action('woocommerce_checkout_order_processed', [$this, 'set_initial_status_and_send_webhook'], 20, 3);
             add_action('woocommerce_store_api_checkout_order_processed', [$this, 'handle_store_api_order_processed'], 20, 1);
             add_action('ppw_retry_created_webhook', [$this, 'retry_created_webhook'], 10, 1);
+            add_action('ppw_retry_updated_webhook', [$this, 'retry_updated_webhook'], 10, 2);
             add_action('woocommerce_order_item_meta_end', [$this, 'render_order_item_file_meta'], 10, 3);
 
             add_filter('woocommerce_valid_order_statuses_for_payment', [$this, 'allow_payment_for_custom_status'], 10, 2);
+            add_filter('woocommerce_valid_order_statuses_for_payment_complete', [$this, 'allow_payment_for_custom_status'], 10, 2);
             add_filter('woocommerce_order_needs_payment', [$this, 'order_needs_payment_for_custom_status'], 10, 3);
             add_filter('woocommerce_cart_needs_payment', [$this, 'disable_initial_payment_for_print_orders'], 10, 2);
 
@@ -972,6 +979,10 @@ public function cleanup_duplicate_plain_items() {
                 return;
             }
 
+            if ((int) $order->get_meta(self::ORDER_META_UPDATE_REVISION, true) > 0) {
+                return;
+            }
+
             $has_print_items = false;
             $file_urls = [];
             foreach ($order->get_items() as $item) {
@@ -986,13 +997,12 @@ public function cleanup_duplicate_plain_items() {
                 return;
             }
 
-            if (!$order->has_status('file-review')) {
-                $order->update_status('file-review', 'Заказ автоматически переведен в статус «На проверке файла».');
-            }
-
             if ('yes' === $order->get_meta(self::ORDER_META_WEBHOOK_SENT, true)) {
                 return;
             }
+
+            // Delivery retries must not undo approval, payment or cancellation.
+            $this->evaluate_order_file_workflow($order);
 
             $attempts = (int) $order->get_meta(self::ORDER_META_WEBHOOK_ATTEMPTS, true) + 1;
             $order->update_meta_data(self::ORDER_META_WEBHOOK_ATTEMPTS, $attempts);
@@ -1022,7 +1032,31 @@ public function cleanup_duplicate_plain_items() {
             }
         }
 
-        private function send_webhook($order, $file_urls) {
+        public function retry_updated_webhook($order_id, $revision) {
+            $order = wc_get_order($order_id);
+            if (!$order || (int) $order->get_meta(self::ORDER_META_UPDATE_REVISION, true) !== (int) $revision ||
+                (int) $order->get_meta(self::ORDER_META_UPDATE_SENT, true) >= (int) $revision) {
+                return;
+            }
+            $attempts = (int) $order->get_meta(self::ORDER_META_UPDATE_ATTEMPTS, true) + 1;
+            $order->update_meta_data(self::ORDER_META_UPDATE_ATTEMPTS, $attempts);
+            $file_urls = [];
+            foreach ($order->get_items() as $item) {
+                $file_urls[] = $item->get_meta(self::ITEM_META_URL, true);
+            }
+            if ($this->send_webhook($order, $file_urls, [
+                'revision' => (int) $revision,
+                'action' => $order->get_meta(self::ORDER_META_UPDATE_ACTION, true),
+                'changed_item_id' => (int) $order->get_meta(self::ORDER_META_UPDATE_ITEM, true),
+            ])) {
+                $order->update_meta_data(self::ORDER_META_UPDATE_SENT, (int) $revision);
+            } elseif ($attempts < 5 && !wp_next_scheduled('ppw_retry_updated_webhook', [$order->get_id(), (int) $revision])) {
+                wp_schedule_single_event(time() + MINUTE_IN_SECONDS, 'ppw_retry_updated_webhook', [$order->get_id(), (int) $revision]);
+            }
+            $order->save_meta_data();
+        }
+
+        private function send_webhook($order, $file_urls, $update = []) {
             $webhook_url = trim((string) get_option(self::OPTION_WEBHOOK_URL, ''));
             if (!$webhook_url) {
                 return false;
@@ -1039,6 +1073,7 @@ public function cleanup_duplicate_plain_items() {
                     'total'        => $item->get_total(),
                     'file_url'     => $item->get_meta(self::ITEM_META_URL, true),
                     'file_name'    => $item->get_meta(self::ITEM_META_NAME, true),
+                    'proof_url'    => $item->get_meta(self::ITEM_META_PROOF_URL, true),
                     'isPDFCheked'  => $this->is_item_pdf_checked($item),
                     'pdfCheckResult' => $this->get_item_review_status($item),
                     'review_status'=> $this->get_item_review_status($item),
@@ -1048,6 +1083,10 @@ public function cleanup_duplicate_plain_items() {
 
             $payload = [
                 'event'        => 'print_order_created',
+                'event_id'     => 'ppw-order-' . $order->get_id() . '-revision-0',
+                'revision'     => 0,
+                'action'       => 'checkout',
+                'changed_item_id' => 0,
                 'order_id'     => $order->get_id(),
                 'order_key'    => $order->get_order_key(),
                 'status'       => $order->get_status(),
@@ -1063,6 +1102,10 @@ public function cleanup_duplicate_plain_items() {
                 'items'        => $items,
                 'created_at'   => current_time('mysql'),
             ];
+            if ($update) {
+                $payload = array_merge($payload, $update);
+                $payload['event_id'] = 'ppw-order-' . $order->get_id() . '-revision-' . $update['revision'];
+            }
 
             $headers = ['Content-Type' => 'application/json'];
             $secret = trim((string) get_option(self::OPTION_WEBHOOK_SECRET, ''));
@@ -1109,7 +1152,7 @@ public function cleanup_duplicate_plain_items() {
                 echo '<p class="ppw-file-note">' . esc_html($note) . '</p>';
             }
 
-            if ($order instanceof WC_Order && $order->has_status('file-review') && 'failed' === $status) {
+            if ($this->order_allows_file_changes($order) && 'failed' === $status) {
                 $nonce = wp_create_nonce('ppw_replace_file_' . $order->get_id() . '_' . $item_id);
                 echo '<form class="ppw-file-action-form" method="post" enctype="multipart/form-data">';
                 echo '<input type="hidden" name="ppw_action" value="replace_file">';
@@ -1122,7 +1165,7 @@ public function cleanup_duplicate_plain_items() {
                 echo '</form>';
             }
 
-            if ($order instanceof WC_Order && $order->has_status('file-review') && $this->status_requires_customer_confirmation($status) && $proof_url) {
+            if ($this->order_allows_file_changes($order) && $this->status_requires_customer_confirmation($status) && $proof_url) {
                 $nonce = wp_create_nonce('ppw_confirm_item_proof_' . $order->get_id() . '_' . $item_id);
                 echo '<div class="ppw-item-proof">';
                 echo '<p><a class="button" href="' . esc_url($proof_url) . '" target="_blank" rel="noopener" download>Скачать файл для утверждения</a></p>';
@@ -1134,6 +1177,17 @@ public function cleanup_duplicate_plain_items() {
                 echo '<input type="hidden" name="_wpnonce" value="' . esc_attr($nonce) . '">';
                 echo '<button type="submit" class="button alt">Утверждаю</button>';
                 echo '</form></div>';
+            }
+
+            if ($this->order_allows_file_changes($order) && ('failed' === $status || $this->status_requires_customer_confirmation($status))) {
+                echo '<form class="ppw-file-action-form" method="post">';
+                echo '<input type="hidden" name="ppw_action" value="remove_item">';
+                echo '<input type="hidden" name="order_id" value="' . esc_attr($order->get_id()) . '">';
+                echo '<input type="hidden" name="item_id" value="' . esc_attr($item_id) . '">';
+                echo '<input type="hidden" name="order_key" value="' . esc_attr($order->get_order_key()) . '">';
+                wp_nonce_field('ppw_remove_item_' . $order->get_id() . '_' . $item_id);
+                echo '<button type="submit" class="button">Удалить позицию из заказа</button>';
+                echo '</form>';
             }
 
             $config = json_decode((string) $item->get_meta(self::ITEM_META_CONFIG, true), true);
@@ -1389,6 +1443,7 @@ public function cleanup_duplicate_plain_items() {
         private function get_review_status_options() {
             return [
                 'pending'               => 'Проверяется',
+                'accepted'              => 'Файл принят типографией',
                 'failed'                => 'Проверка не пройдена — нужен новый файл',
                 'awaiting_modified_confirmation' => 'Изменён под требования — ждёт утверждения клиента',
                 'awaiting_print_confirmation' => 'Проверен и подготовлен к печати — ждёт утверждения клиента',
@@ -1403,6 +1458,15 @@ public function cleanup_duplicate_plain_items() {
 
         private function sanitize_review_status($status) {
             $status = sanitize_key((string) $status);
+            $aliases = [
+                'done' => 'accepted',
+                'changedneedapprov' => 'awaiting_modified_confirmation',
+                'needapprov' => 'awaiting_print_confirmation',
+                'neednewfile' => 'failed',
+            ];
+            if (isset($aliases[$status])) {
+                return $aliases[$status];
+            }
             // Statuses from versions before 1.4 remain readable.
             if ('awaiting_confirmation' === $status) {
                 return 'awaiting_modified_confirmation';
@@ -1455,6 +1519,10 @@ public function cleanup_duplicate_plain_items() {
             $proof_url = esc_url_raw((string) $request->get_param('proof_url'));
 
             $map = [
+                'done' => 'accepted',
+                'changedneedapprov' => 'awaiting_modified_confirmation',
+                'needapprov' => 'awaiting_print_confirmation',
+                'neednewfile' => 'failed',
                 'failed'   => 'failed',
                 'rejected' => 'failed',
                 'modified' => 'awaiting_modified_confirmation',
@@ -1464,19 +1532,40 @@ public function cleanup_duplicate_plain_items() {
                 'success'  => 'awaiting_print_confirmation',
             ];
             if (!$order_id || !$item_id || !isset($map[$result])) {
-                return new WP_REST_Response(['success' => false, 'message' => 'Required: order_id, item_id and result=failed|modified|print_ready.'], 400);
-            }
-            if ($this->status_requires_customer_confirmation($map[$result]) && !$proof_url) {
-                return new WP_REST_Response(['success' => false, 'message' => 'proof_url is required when customer approval is required.'], 400);
+                return new WP_REST_Response(['success' => false, 'message' => 'Required: order_id, item_id and result=done|ChangedNeedApprov|NeedApprov|needNewFile (legacy failed|modified|print_ready also supported).'], 400);
             }
 
             $order = wc_get_order($order_id);
             if (!$order) {
                 return new WP_REST_Response(['success' => false, 'message' => 'Order not found.'], 404);
             }
+            if (!$this->order_allows_file_changes($order)) {
+                return new WP_REST_Response(['success' => false, 'message' => 'This order no longer accepts file review changes.'], 409);
+            }
+            if (null !== $request->get_param('revision') && (int) $request->get_param('revision') !== (int) $order->get_meta(self::ORDER_META_UPDATE_REVISION, true)) {
+                return new WP_REST_Response(['success' => false, 'message' => 'Stale order revision.'], 409);
+            }
             $item = $order->get_item($item_id);
             if (!$item instanceof WC_Order_Item_Product || !$item->get_meta(self::ITEM_META_URL, true)) {
                 return new WP_REST_Response(['success' => false, 'message' => 'Order item not found or has no print file.'], 404);
+            }
+            if ('approved' === $this->get_item_review_status($item)) {
+                return new WP_REST_Response(['success' => false, 'message' => 'The customer has already approved this file.'], 409);
+            }
+
+            // Authenticate and validate the order before accepting a multipart upload.
+            $files = $request->get_file_params();
+            if ($this->status_requires_customer_confirmation($map[$result])) {
+                if (!empty($files['proof_file']['name'])) {
+                    $uploaded = $this->handle_upload($files['proof_file']);
+                    if (is_wp_error($uploaded)) {
+                        return new WP_REST_Response(['success' => false, 'message' => $uploaded->get_error_message()], 400);
+                    }
+                    $proof_url = $uploaded['url'];
+                }
+                if (!$proof_url) {
+                    return new WP_REST_Response(['success' => false, 'message' => 'proof_url or multipart proof_file is required when customer approval is required.'], 400);
+                }
             }
 
             $status = $map[$result];
@@ -1522,38 +1611,70 @@ public function cleanup_duplicate_plain_items() {
             return $order->get_checkout_order_received_url();
         }
 
+        private function order_allows_file_changes($order) {
+            return $order instanceof WC_Order && !$order->is_paid() && !$order->get_date_paid() &&
+                $order->has_status(['pending', 'on-hold', 'file-review', 'awaiting-payment']);
+        }
+
         public function handle_customer_file_workflow_action() {
             if (empty($_POST['ppw_action']) || empty($_POST['order_id']) || empty($_POST['item_id'])) {
                 return;
             }
             $action = sanitize_key(wp_unslash($_POST['ppw_action']));
-            if (!in_array($action, ['replace_file', 'confirm_item_proof'], true)) {
+            if (!in_array($action, ['replace_file', 'confirm_item_proof', 'remove_item'], true)) {
                 return;
             }
-
-            $order_id = absint($_POST['order_id']);
-            $item_id = absint($_POST['item_id']);
-            $order = wc_get_order($order_id);
-            if (!$order || !$this->customer_can_manage_order($order, isset($_POST['order_key']) ? wp_unslash($_POST['order_key']) : '')) {
+            $order = wc_get_order(absint($_POST['order_id']));
+            if (!$order) {
                 return;
+            }
+            $result = $this->process_customer_file_action(
+                $order, absint($_POST['item_id']), $action,
+                isset($_POST['order_key']) ? wp_unslash($_POST['order_key']) : '',
+                isset($_POST['_wpnonce']) ? sanitize_text_field(wp_unslash($_POST['_wpnonce'])) : '',
+                isset($_FILES['ppw_replacement_file']) ? $_FILES['ppw_replacement_file'] : []
+            );
+            if (is_wp_error($result)) {
+                wc_add_notice($result->get_error_message(), 'error');
+            } else {
+                wc_add_notice($result, 'success');
+            }
+            // Never redirect an unauthorized request to an order URL containing its key.
+            if (!$this->customer_can_manage_order($order, isset($_POST['order_key']) ? wp_unslash($_POST['order_key']) : '')) {
+                return;
+            }
+            wp_safe_redirect($this->get_customer_order_return_url($order));
+            exit;
+        }
+
+        /** Shared by the customer POST handler; returns a message or a WP_Error. */
+        public function process_customer_file_action($order, $item_id, $action, $order_key, $nonce, $file = []) {
+            if (!$this->customer_can_manage_order($order, $order_key)) {
+                return new WP_Error('ppw_access_denied', 'Нет доступа к этому заказу.');
+            }
+            $nonce_actions = [
+                'replace_file' => 'ppw_replace_file_',
+                'confirm_item_proof' => 'ppw_confirm_item_proof_',
+                'remove_item' => 'ppw_remove_item_',
+            ];
+            if (!isset($nonce_actions[$action]) || !wp_verify_nonce($nonce, $nonce_actions[$action] . $order->get_id() . '_' . $item_id)) {
+                return new WP_Error('ppw_invalid_nonce', 'Обновите страницу заказа и повторите действие.');
+            }
+            if (!$this->order_allows_file_changes($order)) {
+                return new WP_Error('ppw_order_locked', 'Файлы этого заказа больше нельзя изменять.');
             }
             $item = $order->get_item($item_id);
-            if (!$item instanceof WC_Order_Item_Product || !$item->get_meta(self::ITEM_META_URL, true) || !$order->has_status('file-review')) {
-                return;
+            if (!$item instanceof WC_Order_Item_Product || !$item->get_meta(self::ITEM_META_URL, true)) {
+                return new WP_Error('ppw_invalid_item', 'Позиция с файлом не найдена в этом заказе.');
             }
-
+            $status = $this->get_item_review_status($item);
             if ('replace_file' === $action) {
-                if (!wp_verify_nonce(isset($_POST['_wpnonce']) ? sanitize_text_field(wp_unslash($_POST['_wpnonce'])) : '', 'ppw_replace_file_' . $order_id . '_' . $item_id)) {
-                    return;
+                if ('failed' !== $status || empty($file['name'])) {
+                    return new WP_Error('ppw_invalid_replacement', 'Для этой позиции нельзя загрузить замену или файл не выбран.');
                 }
-                if ('failed' !== $this->get_item_review_status($item) || empty($_FILES['ppw_replacement_file']['name'])) {
-                    return;
-                }
-                $uploaded = $this->handle_upload($_FILES['ppw_replacement_file']);
+                $uploaded = $this->handle_upload($file);
                 if (is_wp_error($uploaded)) {
-                    wc_add_notice($uploaded->get_error_message(), 'error');
-                    wp_safe_redirect($this->get_customer_order_return_url($order));
-                    exit;
+                    return $uploaded;
                 }
                 $item->update_meta_data(self::ITEM_META_URL, esc_url_raw($uploaded['url']));
                 $item->update_meta_data(self::ITEM_META_PATH, sanitize_text_field($uploaded['file']));
@@ -1561,35 +1682,53 @@ public function cleanup_duplicate_plain_items() {
                 $this->set_item_review_status($item, 'pending');
                 $item->update_meta_data(self::ITEM_META_REVIEW_NOTE, 'Новый файл загружен и отправлен на повторную проверку.');
                 $item->delete_meta_data(self::ITEM_META_PROOF_URL);
+                $item->delete_meta_data(self::ITEM_META_REVIEWED_AT);
                 $item->save();
-                $order->add_order_note(sprintf('Клиент загрузил новый файл для позиции #%d. Файл отправлен на повторную проверку.', $item_id));
-                $this->send_item_webhook($order, $item, 'print_file_reuploaded');
-                wc_add_notice('Новый файл загружен и отправлен на повторную проверку.', 'success');
-            }
-
-            if ('confirm_item_proof' === $action) {
-                if (!wp_verify_nonce(isset($_POST['_wpnonce']) ? sanitize_text_field(wp_unslash($_POST['_wpnonce'])) : '', 'ppw_confirm_item_proof_' . $order_id . '_' . $item_id)) {
-                    return;
-                }
-                if (!$this->status_requires_customer_confirmation($this->get_item_review_status($item))) {
-                    return;
+                $message = 'Новый файл загружен и отправлен на повторную проверку.';
+            } elseif ('confirm_item_proof' === $action) {
+                if (!$this->status_requires_customer_confirmation($status) || !$item->get_meta(self::ITEM_META_PROOF_URL, true)) {
+                    return new WP_Error('ppw_missing_proof', 'Нет файла, ожидающего вашего утверждения.');
                 }
                 $this->set_item_review_status($item, 'approved');
                 $item->update_meta_data(self::ITEM_META_REVIEW_NOTE, 'Файл утверждён клиентом.');
                 $item->update_meta_data(self::ITEM_META_REVIEWED_AT, current_time('mysql'));
                 $item->save();
-                $order->add_order_note(sprintf('Клиент подтвердил исправленный файл позиции #%d.', $item_id));
-                $this->send_item_webhook($order, $item, 'print_file_approved');
-                wc_add_notice('Файл подтверждён.', 'success');
+                $message = 'Файл подтверждён.';
+            } else {
+                if ('failed' !== $status && !$this->status_requires_customer_confirmation($status)) {
+                    return new WP_Error('ppw_cannot_remove', 'Эту позицию больше нельзя удалить.');
+                }
+                $order->remove_item($item_id);
+                $message = 'Позиция удалена. Стоимость заказа пересчитана.';
             }
 
+            // Keep the existing agreed prices; recalculate discounts, taxes and totals.
+            if ('remove_item' === $action && $order->get_items('coupon')) {
+                $order->recalculate_coupons();
+            }
+            if (!$order->get_items()) {
+                // An empty order must not keep a shipping charge or be payable.
+                foreach ($order->get_items(['shipping', 'fee', 'coupon']) as $charge_id => $charge) {
+                    $order->remove_item($charge_id);
+                }
+            }
+            $order->calculate_totals();
+            $order->add_order_note(sprintf('Действие клиента с позицией #%d: %s', $item_id, $message));
             $this->evaluate_order_file_workflow($order);
-            wp_safe_redirect($this->get_customer_order_return_url($order));
-            exit;
+            $revision = (int) $order->get_meta(self::ORDER_META_UPDATE_REVISION, true) + 1;
+            $order->update_meta_data(self::ORDER_META_UPDATE_REVISION, $revision);
+            $order->update_meta_data(self::ORDER_META_UPDATE_ATTEMPTS, 0);
+            $order->update_meta_data(self::ORDER_META_UPDATE_ACTION, $action);
+            $order->update_meta_data(self::ORDER_META_UPDATE_ITEM, $item_id);
+            $order->save();
+            // A new full snapshot supersedes any pending initial or older update delivery.
+            wp_clear_scheduled_hook('ppw_retry_created_webhook', [$order->get_id()]);
+            $this->retry_updated_webhook($order->get_id(), $revision);
+            return $message;
         }
 
         private function evaluate_order_file_workflow($order) {
-            if (!$order instanceof WC_Order || $order->has_status(['processing', 'completed', 'cancelled', 'refunded', 'failed'])) {
+            if (!$order instanceof WC_Order || $order->is_paid() || $order->get_date_paid() || $order->has_status(['processing', 'completed', 'cancelled', 'refunded', 'failed'])) {
                 return;
             }
 
@@ -1600,11 +1739,15 @@ public function cleanup_duplicate_plain_items() {
                     continue;
                 }
                 $has_files = true;
-                if ('approved' !== $this->get_item_review_status($item)) {
+                if (!in_array($this->get_item_review_status($item), ['accepted', 'approved'], true)) {
                     $all_ready = false;
                 }
             }
-            if (!$has_files) {
+            if (!$order->get_items()) {
+                $order->update_status('cancelled', 'Все позиции удалены клиентом.');
+                return;
+            }
+            if (!$has_files && !$order->has_status('file-review')) {
                 return;
             }
 
@@ -1615,34 +1758,6 @@ public function cleanup_duplicate_plain_items() {
             } elseif (!$order->has_status('file-review')) {
                 $order->update_status('file-review', 'Не все файлы завершили проверку. Оплата закрыта до завершения проверки.');
             }
-        }
-
-        private function send_item_webhook($order, $item, $event) {
-            $webhook_url = trim((string) get_option(self::OPTION_WEBHOOK_URL, ''));
-            if (!$webhook_url || !$order instanceof WC_Order || !$item instanceof WC_Order_Item_Product) {
-                return;
-            }
-            $payload = [
-                'event'        => $event,
-                'order_id'     => $order->get_id(),
-                'order_key'    => $order->get_order_key(),
-                'item_id'      => $item->get_id(),
-                'product_id'   => $item->get_product_id(),
-                'variation_id' => $item->get_variation_id(),
-                'name'         => $item->get_name(),
-                'file_url'     => $item->get_meta(self::ITEM_META_URL, true),
-                'file_name'    => $item->get_meta(self::ITEM_META_NAME, true),
-                'isPDFCheked'  => $this->is_item_pdf_checked($item),
-                'pdfCheckResult' => $this->get_item_review_status($item),
-                'config'       => json_decode((string) $item->get_meta(self::ITEM_META_CONFIG, true), true),
-                'created_at'   => current_time('mysql'),
-            ];
-            $headers = ['Content-Type' => 'application/json'];
-            $secret = trim((string) get_option(self::OPTION_WEBHOOK_SECRET, ''));
-            if ($secret) {
-                $headers['X-PPW-Secret'] = $secret;
-            }
-            wp_remote_post($webhook_url, ['timeout' => 20, 'headers' => $headers, 'body' => wp_json_encode($payload)]);
         }
 
         public function maybe_send_payment_ready_email($order_id, $from_status, $to_status, $order) {
