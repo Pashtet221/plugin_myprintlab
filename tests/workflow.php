@@ -59,6 +59,14 @@ $act = function ($order_id, $item_id, $action, $key = null, $nonce = null) use (
 };
 try {
     $order = $make_order(4); $ids = array_keys($order->get_items());
+    $check($ppw->get_hidden_admin_order_statuses($order) === ['pending', 'on-hold', 'awaiting-proof'], 'Print editor hides unrelated manual status choices');
+    $order->set_status('on-hold');
+    $check(!in_array('on-hold', $ppw->get_hidden_admin_order_statuses($order), true), 'Existing order status remains selectable');
+    $order->set_status('file-review');
+    $ordinary = $make_order(0);
+    $check($ppw->get_hidden_admin_order_statuses($ordinary) === [], 'Ordinary orders keep all status choices');
+    $statuses = wc_get_order_statuses();
+    $check(isset($statuses['wc-pending'], $statuses['wc-on-hold'], $statuses['wc-awaiting-proof']) && $statuses['wc-awaiting-payment'] === 'Готов к оплате', 'System statuses remain registered and custom payment label is distinct');
     $cases = ['done'=>'accepted', 'ChangedNeedApprov'=>'awaiting_modified_confirmation', 'NeedApprov'=>'awaiting_print_confirmation', 'needNewFile'=>'failed'];
     $i = 0;
     foreach ($cases as $code=>$expected) {

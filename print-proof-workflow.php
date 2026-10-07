@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Print Product Workflow for WooCommerce
  * Description: Загрузка файла для товаров типографии, вебхук, статусы проверки/оплаты/утверждения макета, подтверждение макета клиентом.
- * Version: 1.5.0
+ * Version: 1.5.1
  * Author: OpenAI
  * Requires Plugins: woocommerce
  * Text Domain: ppw
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
 
 if (!class_exists('PPW_Print_Product_Workflow')) {
     class PPW_Print_Product_Workflow {
-        const VERSION = '1.5.0';
+        const VERSION = '1.5.1';
         const PRODUCT_META_ENABLED = '_ppw_enable_print_workflow';
         const PRODUCT_META_CONFIG = '_ppw_configurator_json';
         const CART_KEY_CONFIG = 'ppw_configurator';
@@ -88,6 +88,7 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
 
             add_action('admin_menu', [$this, 'add_settings_page']);
             add_action('admin_init', [$this, 'register_settings']);
+            add_action('admin_footer', [$this, 'simplify_admin_order_status_select']);
             add_action('wp_ajax_ppw_ajax_add_to_cart', [$this, 'ajax_add_to_cart']);
             add_action('wp_ajax_nopriv_ppw_ajax_add_to_cart', [$this, 'ajax_add_to_cart']);
             add_action('woocommerce_add_to_cart', [$this, 'prevent_duplicate_plain_add'], 20, 6);
@@ -152,12 +153,12 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
             ]);
 
             register_post_status('wc-awaiting-payment', [
-                'label'                     => 'Ожидает оплаты',
+                'label'                     => 'Готов к оплате',
                 'public'                    => true,
                 'exclude_from_search'       => false,
                 'show_in_admin_all_list'    => true,
                 'show_in_admin_status_list' => true,
-                'label_count'               => _n_noop('Ожидает оплаты <span class="count">(%s)</span>', 'Ожидает оплаты <span class="count">(%s)</span>', 'ppw'),
+                'label_count'               => _n_noop('Готов к оплате <span class="count">(%s)</span>', 'Готов к оплате <span class="count">(%s)</span>', 'ppw'),
             ]);
 
             register_post_status('wc-awaiting-proof', [
@@ -176,11 +177,60 @@ if (!class_exists('PPW_Print_Product_Workflow')) {
                 $new_statuses[$key] = $label;
                 if ('wc-pending' === $key) {
                     $new_statuses['wc-file-review'] = 'На проверке файла';
-                    $new_statuses['wc-awaiting-payment'] = 'Ожидает оплаты';
+                    $new_statuses['wc-awaiting-payment'] = 'Готов к оплате';
                     $new_statuses['wc-awaiting-proof'] = 'Ожидает утверждения макета';
                 }
             }
             return $new_statuses;
+        }
+
+        /** Presentation only: keep all statuses registered for payments, API and history. */
+        public function get_hidden_admin_order_statuses($order) {
+            if (!$order instanceof WC_Order) {
+                return [];
+            }
+            $has_print_file = false;
+            foreach ($order->get_items() as $item) {
+                if ($item->get_meta(self::ITEM_META_URL, true)) {
+                    $has_print_file = true;
+                    break;
+                }
+            }
+            if (!$has_print_file) {
+                return [];
+            }
+            $hidden = ['pending', 'on-hold', 'awaiting-proof'];
+            return array_values(array_diff($hidden, [$order->get_status()]));
+        }
+
+        public function simplify_admin_order_status_select() {
+            $screen = get_current_screen();
+            if (!$screen || !in_array($screen->id, ['shop_order', 'woocommerce_page_wc-orders'], true)) {
+                return;
+            }
+            // Both the classic editor and the HPOS order editor use #order_status.
+            $order_id = isset($_GET['id']) ? absint($_GET['id']) : (isset($_GET['post']) ? absint($_GET['post']) : 0);
+            if (!$order_id) {
+                return;
+            }
+            $hidden = $this->get_hidden_admin_order_statuses(wc_get_order($order_id));
+            if (!$hidden) {
+                return;
+            }
+            ?>
+            <script>
+            (function () {
+                var select = document.getElementById('order_status');
+                if (!select) return;
+                var hidden = <?php echo wp_json_encode($hidden); ?>;
+                Array.from(select.options).forEach(function (option) {
+                    var status = option.value.replace(/^wc-/, '');
+                    if (!option.selected && hidden.indexOf(status) !== -1) option.remove();
+                });
+                if (window.jQuery) window.jQuery(select).trigger('change.select2');
+            }());
+            </script>
+            <?php
         }
 
 
